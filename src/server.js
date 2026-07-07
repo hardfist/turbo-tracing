@@ -54,8 +54,8 @@ async function main() {
     }
   });
 
-  app.get('/api/sessions/:id', (req, res) => {
-    const session = sessions.getSession(req.params.id);
+  app.get('/api/sessions/:id', async (req, res) => {
+    const session = await sessions.getSession(req.params.id);
     if (!session) {
       res.status(404).json({ error: 'unknown session' });
       return;

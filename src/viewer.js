@@ -26,19 +26,34 @@ function extractStaticAssetPaths(html) {
 
 function patchViewerJs(source) {
   const wsExpression = '"ws://localhost:".concat(u)';
-  const replacement = '(()=>{let session=new URLSearchParams(window.location.search).get("session")||"";let proto=window.location.protocol==="https:"?"wss:":"ws:";return proto+"//"+window.location.host+"/ws/"+encodeURIComponent(session)})()';
-  if (!source.includes(wsExpression)) {
-    return { code: source, patched: false };
+  const replacement = `(()=>{let session=new URLSearchParams(window.location.search).get("session")||"";let proto=window.location.protocol==="https:"?"wss:":"ws:";let base=${JSON.stringify(config.basePath)};return proto+"//"+window.location.host+base+"/ws/"+encodeURIComponent(session)})()`;
+  let code = source;
+  let patched = false;
+  if (code.includes(wsExpression)) {
+    code = code.replace(wsExpression, replacement);
+    patched = true;
   }
-  return { code: source.replace(wsExpression, replacement), patched: true };
+
+  // The public trace viewer's size hook can get stuck at 0x0 when mirrored under
+  // a reverse-proxied base path. If that happens, seed it from the measured
+  // parent container so the canvas can mount and the viewer starts querying data.
+  const sizeExpression = '}=tM();g[0]!==E||g[1]!==S?';
+  const sizeFallback = '}=tM();(!S||!E)&&w.current&&([S,E]=[w.current.offsetWidth||window.innerWidth,w.current.offsetHeight||Math.max(1,window.innerHeight-w.current.getBoundingClientRect().top)]);g[0]!==E||g[1]!==S?';
+  if (code.includes(sizeExpression) && !code.includes('window.innerHeight-w.current.getBoundingClientRect().top')) {
+    code = code.replace(sizeExpression, sizeFallback);
+    patched = true;
+  }
+
+  return { code, patched };
 }
 
 function withBasePath(html) {
   if (!config.basePath) return html;
   return html
-    .replace(/(src|href)=(["'])\/_next\//g, `$1=$2${config.basePath}/_next/`)
-    .replace(/(href)=(["'])\/favicon\.ico/g, `$1=$2${config.basePath}/favicon.ico`)
-    .replace(/(href)=(["'])\/icon\.svg/g, `$1=$2${config.basePath}/icon.svg`);
+    // Patch both normal attributes and escaped RSC module references.
+    .replace(/(["'])\/_next\//g, `$1${config.basePath}/_next/`)
+    .replace(/(["'])\/favicon\.ico/g, `$1${config.basePath}/favicon.ico`)
+    .replace(/(["'])\/icon\.svg/g, `$1${config.basePath}/icon.svg`);
 }
 
 function injectUploadLayer(html) {

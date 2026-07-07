@@ -35,12 +35,22 @@ class SessionManager {
   async createSession(uploadedFile) {
     await ensureDir(this.uploadDir);
     const sessionId = nanoid(12);
+    const storedName = `${sessionId}-${path.basename(uploadedFile.originalname || 'trace.bin').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const tracePath = path.join(this.uploadDir, storedName);
+    await fs.rename(uploadedFile.path, tracePath);
+    const session = await this.startTraceServer({
+      sessionId,
+      tracePath,
+      fileName: uploadedFile.originalname || storedName,
+      size: uploadedFile.size,
+      createdAt: Date.now(),
+    });
+    return this.publicSession(session);
+  }
+
+  async startTraceServer({ sessionId, tracePath, fileName, size, createdAt }) {
     const port = await getFreePort();
     const binary = await resolveTraceServerBinary();
-    const fileName = `${sessionId}-${path.basename(uploadedFile.originalname || 'trace.bin').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    const tracePath = path.join(this.uploadDir, fileName);
-    await fs.rename(uploadedFile.path, tracePath);
-
     const child = spawn(binary.binPath, [tracePath, String(port)], {
       cwd: this.uploadDir,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -60,10 +70,10 @@ class SessionManager {
       id: sessionId,
       port,
       tracePath,
-      fileName: uploadedFile.originalname || fileName,
-      size: uploadedFile.size,
+      fileName,
+      size,
       child,
-      createdAt: now,
+      createdAt: createdAt || now,
       lastUsedAt: now,
       binary,
       logs,
@@ -84,11 +94,30 @@ class SessionManager {
       throw new Error(`turbo-trace-server exited early (${child.exitCode}): ${logText.slice(-2000)}`);
     }
 
-    return this.publicSession(session);
+    return session;
   }
 
-  getSession(id) {
-    const session = this.sessions.get(id);
+  async restoreSession(id) {
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) return null;
+    await ensureDir(this.uploadDir);
+    const entries = await fs.readdir(this.uploadDir).catch(() => []);
+    const storedName = entries.find((name) => name.startsWith(`${id}-`));
+    if (!storedName) return null;
+    const tracePath = path.join(this.uploadDir, storedName);
+    const stat = await fs.stat(tracePath).catch(() => null);
+    if (!stat || !stat.isFile()) return null;
+    return this.startTraceServer({
+      sessionId: id,
+      tracePath,
+      fileName: storedName.slice(id.length + 1) || storedName,
+      size: stat.size,
+      createdAt: stat.mtimeMs,
+    });
+  }
+
+  async getSession(id) {
+    let session = this.sessions.get(id);
+    if (!session) session = await this.restoreSession(id);
     if (session) session.lastUsedAt = Date.now();
     return session;
   }
@@ -140,29 +169,65 @@ class SessionManager {
   }
 
   proxyWebSocket(sessionId, browserSocket) {
-    const session = this.getSession(sessionId);
-    if (!session) {
-      browserSocket.close(1008, 'unknown trace session');
-      return;
-    }
-
-    const upstream = new WebSocket(`ws://127.0.0.1:${session.port}`);
     const pendingBrowserMessages = [];
+    let upstreamReady = null;
+
+    browserSocket.on('message', (data, isBinary) => {
+      if (upstreamReady) {
+        upstreamReady(data, isBinary);
+      } else {
+        pendingBrowserMessages.push([data, isBinary]);
+      }
+    });
+
+    this.getSession(sessionId).then((session) => {
+      if (!session) {
+        browserSocket.close(1008, 'unknown trace session');
+        return;
+      }
+      this.proxyWebSocketToSession(session, browserSocket, pendingBrowserMessages, (sender) => {
+        upstreamReady = sender;
+      });
+    }).catch((error) => {
+      browserSocket.close(1011, `trace session restore failed: ${error.message}`.slice(0, 120));
+    });
+  }
+
+  proxyWebSocketToSession(session, browserSocket, pendingBrowserMessages, setUpstreamSender) {
+    const upstream = new WebSocket(`ws://127.0.0.1:${session.port}`);
     const closeBoth = (code, reason) => {
       try { if (browserSocket.readyState === WebSocket.OPEN) browserSocket.close(code, reason); } catch {}
       try { if (upstream.readyState === WebSocket.OPEN) upstream.close(code, reason); } catch {}
     };
 
-    browserSocket.on('message', (data, isBinary) => {
+    const sendToUpstream = (data, isBinary) => {
       session.lastUsedAt = Date.now();
       if (upstream.readyState === WebSocket.OPEN) {
         upstream.send(data, { binary: isBinary });
       } else if (upstream.readyState === WebSocket.CONNECTING) {
         pendingBrowserMessages.push([data, isBinary]);
       }
-    });
+    };
+    setUpstreamSender(sendToUpstream);
 
     upstream.on('open', () => {
+      // Seed the trace server with a valid viewport. Some clients send this as
+      // their very first frame; if that frame races session restoration, the
+      // viewer stays blank. This idempotent request makes the session useful
+      // immediately, and later client view-rect frames refine it.
+      upstream.send(JSON.stringify({
+        type: 'view-rect',
+        viewRect: {
+          x: 0,
+          y: 0,
+          width: 1000000,
+          height: 80,
+          horizontalPixels: 1600,
+          query: '',
+          viewMode: 'aggregated',
+          valueMode: 'duration',
+        },
+      }));
       while (pendingBrowserMessages.length > 0 && upstream.readyState === WebSocket.OPEN) {
         const [data, isBinary] = pendingBrowserMessages.shift();
         upstream.send(data, { binary: isBinary });
