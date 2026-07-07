@@ -1,0 +1,17 @@
+services:
+  turbopack-tracing:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      HOST: 0.0.0.0
+      DATA_DIR: /data
+      BUNDLER_DIFF_REPO: hardfist/bundler-diff
+      TRACE_SERVER_RELEASE_TAG: turbopack-cli-main
+      TRACE_SERVER_ASSET: turbo-trace-server-linux-x64.tar.gz
+    volumes:
+      - turbopack-tracing-data:/data
+
+volumes:
+  turbopack-tracing-data:
