@@ -119,6 +119,66 @@
   badge.textContent = 'Trace fallback: connecting…';
   document.documentElement.appendChild(badge);
 
+  const controls = document.createElement('div');
+  controls.id = 'trace-fallback-controls';
+  controls.style.cssText = 'position:fixed;left:360px;right:220px;top:8px;height:36px;z-index:2147483645;display:flex;gap:8px;align-items:center;justify-content:center;pointer-events:auto;font:13px ui-sans-serif,system-ui;';
+  controls.innerHTML = `
+    <input id="trace-fallback-filter" placeholder="Filter spans" style="width:min(520px,45vw);height:34px;border:1px solid #e5e7eb;border-radius:9px;padding:0 12px;text-align:center;background:white;color:#111827;box-shadow:0 1px 2px rgba(0,0,0,.04)" />
+    <select id="trace-fallback-view-mode" title="View mode" style="height:34px;border:1px solid #e5e7eb;border-radius:9px;padding:0 10px;background:white;color:#111827;box-shadow:0 1px 2px rgba(0,0,0,.04)">
+      <option value="aggregated">Aggregated, execution order</option>
+      <option value="aggregated-sorted">Aggregated, sort by value</option>
+      <option value="aggregated-sorted-by-name">Aggregated, sort by name</option>
+      <option value="aggregated-bottom-up-sorted">Bottom up</option>
+      <option value="aggregated-bottom-up-sorted-by-name">Bottom up, sort by name</option>
+      <option value="root-aggregated">All aggregated, execution order</option>
+      <option value="root-aggregated-sorted">All aggregated, sort by value</option>
+      <option value="root-aggregated-sorted-by-name">All aggregated, sort by name</option>
+      <option value="root-aggregated-bottom-up-sorted">All bottom up</option>
+      <option value="root-aggregated-bottom-up-sorted-by-name">All bottom up, sort by name</option>
+      <option value="raw-spans">All spans, execution order</option>
+      <option value="raw-spans-sorted">All spans, sort by value</option>
+      <option value="raw-spans-sorted-by-name">All spans, sort by name</option>
+    </select>
+    <select id="trace-fallback-value-mode" title="Value" style="height:34px;border:1px solid #e5e7eb;border-radius:9px;padding:0 10px;background:white;color:#111827;box-shadow:0 1px 2px rgba(0,0,0,.04)">
+      <option value="duration">Duration (corrected)</option>
+      <option value="cpu">Duration (CPU)</option>
+      <option value="allocations">Allocated Bytes</option>
+      <option value="allocation-count">Allocation count</option>
+      <option value="deallocations">Deallocated Bytes</option>
+      <option value="persistent-deallocations">Persistently allocated Bytes</option>
+      <option value="count">Span count</option>
+    </select>
+  `;
+  document.documentElement.appendChild(controls);
+
+  const hideOriginalControls = document.createElement('style');
+  hideOriginalControls.id = 'trace-fallback-hide-original-controls';
+  hideOriginalControls.textContent = `
+    input[disabled][placeholder="Filter spans"],
+    button#defaultViewMode[disabled],
+    button#spanValue[disabled] { visibility: hidden !important; }
+  `;
+  document.documentElement.appendChild(hideOriginalControls);
+
+  const filterInput = controls.querySelector('#trace-fallback-filter');
+  const viewModeSelect = controls.querySelector('#trace-fallback-view-mode');
+  const valueModeSelect = controls.querySelector('#trace-fallback-value-mode');
+  let activeSocket = null;
+  let refreshTimer = null;
+  function resetRowsAndRefresh() {
+    state.rows.clear();
+    state.maxX = 100000000000;
+    badge.textContent = 'Trace fallback: updating…';
+    draw();
+    if (activeSocket && activeSocket.readyState === WebSocket.OPEN) sendViewRect(activeSocket);
+  }
+  filterInput.addEventListener('input', () => {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(resetRowsAndRefresh, 250);
+  });
+  viewModeSelect.addEventListener('change', resetRowsAndRefresh);
+  valueModeSelect.addEventListener('change', resetRowsAndRefresh);
+
   function colorFor(text) {
     let hash = 0;
     for (let i = 0; i < text.length; i++) hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
@@ -188,6 +248,10 @@
 
   function sendViewRect(ws) {
     const rect = canvas.getBoundingClientRect();
+    // turbo-trace-server waits for an ack before it processes the next viewport.
+    // Send one defensively so filter/mode changes are not stuck behind the
+    // initial viewport seeded by the proxy or a previous render batch.
+    try { ws.send(JSON.stringify({ type: 'ack' })); } catch {}
     ws.send(JSON.stringify({
       type: 'view-rect',
       viewRect: {
@@ -196,9 +260,9 @@
         width: Math.max(state.maxX || 0, 100000000000),
         height: Math.max(20, Math.ceil(rect.height / 18)),
         horizontalPixels: Math.max(1, Math.ceil(rect.width)),
-        query: '',
-        viewMode: 'aggregated',
-        valueMode: 'duration',
+        query: filterInput.value || '',
+        viewMode: viewModeSelect.value || 'aggregated',
+        valueMode: valueModeSelect.value || 'duration',
       },
     }));
   }
@@ -208,6 +272,7 @@
     const ws = new WebSocket(`${proto}//${window.location.host}${basePath}/ws/${encodeURIComponent(session)}`);
     let interval;
     ws.addEventListener('open', () => {
+      activeSocket = ws;
       state.connected = true;
       badge.textContent = `Trace fallback: connected (${session})`;
       sendViewRect(ws);
@@ -227,12 +292,14 @@
           draw();
         } else if (message.type === 'view-lines-count') {
           badge.textContent = `Trace fallback: ${message.count || state.rows.size} rows`;
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ack' }));
         }
       } catch (error) {
         console.warn('Trace fallback parse error', error);
       }
     });
     ws.addEventListener('close', () => {
+      if (activeSocket === ws) activeSocket = null;
       clearInterval(interval);
       state.connected = false;
       badge.textContent = 'Trace fallback: disconnected, retrying…';
