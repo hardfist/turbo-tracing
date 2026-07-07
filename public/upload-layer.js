@@ -1,4 +1,5 @@
 (() => {
+  const basePath = window.__TRACE_BASE_PATH || '';
   const params = new URLSearchParams(window.location.search);
   const session = params.get('session');
 
@@ -58,11 +59,11 @@
     const body = new FormData();
     body.append('trace', file, file.name);
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body });
+      const res = await fetch(`${basePath}/api/upload`, { method: 'POST', body });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
       status.textContent = `已创建 session ${data.sessionId}，正在打开 viewer...`;
-      window.location.href = `/?session=${encodeURIComponent(data.sessionId)}`;
+      window.location.href = `${basePath}/?session=${encodeURIComponent(data.sessionId)}`;
     } catch (error) {
       status.textContent = `上传失败: ${error.message}`;
     }
